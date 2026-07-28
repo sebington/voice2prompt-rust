@@ -1,0 +1,9 @@
+[package]
+name = "v2p-listener"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+evdev = "0.13"
+clap = { version = "4", features = ["derive"] }
+nix = { version = "0.29", features = ["fs"] }
