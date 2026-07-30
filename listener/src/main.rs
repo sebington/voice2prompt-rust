@@ -107,7 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Cannot create uinput — are you root?");
 
     // UDP sockets
-    let cmd_sock = UdpSocket::bind(format!("127.0.0.1:{UDP_PASTE_PORT}"))?;
+    let cmd_sock = UdpSocket::bind(format!("127.0.0.1:{UDP_PASTE_PORT}"))
+        .map_err(|e| format!("cannot bind UDP :{UDP_PASTE_PORT} ({e}) - is another v2p-listener already running?"))?;
     cmd_sock.set_read_timeout(Some(Duration::from_millis(50)))?;
     let out_sock = UdpSocket::bind("127.0.0.1:0")?;
 

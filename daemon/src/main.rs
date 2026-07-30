@@ -73,31 +73,74 @@ fn download_model(model_file: &str, dest: &std::path::Path) -> Result<(), String
 
 // ── Tray icon ──────────────────────────────────────────────────────────────
 
-fn make_icon(r: u8, g: u8, b: u8) -> tray_icon::Icon {
+const COL_READY: [u8; 3] = [0x2e, 0xcc, 0x71]; // green
+const COL_REC: [u8; 3] = [0xe7, 0x4c, 0x3c]; // red
+const COL_BUSY: [u8; 3] = [0xf1, 0xc4, 0x0f]; // yellow
+
+fn make_icon(rgb: [u8; 3]) -> tray_icon::Icon {
+    // Filled circle with dark border ring on transparent background,
+    // legible at 16px in the GNOME top bar.
     let sz = 64usize;
+    let c = (sz as f32 - 1.0) / 2.0;
+    let r_out = c - 1.0;
+    let r_in = r_out - 7.0;
     let mut px = Vec::with_capacity(sz * sz * 4);
-    for _ in 0..sz * sz {
-        px.extend([r, g, b, 255]);
+    for y in 0..sz {
+        for x in 0..sz {
+            let dx = x as f32 - c;
+            let dy = y as f32 - c;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d <= r_in {
+                px.extend([rgb[0], rgb[1], rgb[2], 255]);
+            } else if d <= r_out {
+                px.extend([rgb[0] / 3, rgb[1] / 3, rgb[2] / 3, 255]);
+            } else {
+                px.extend([0, 0, 0, 0]);
+            }
+        }
     }
     tray_icon::Icon::from_rgba(px, sz as u32, sz as u32).expect("icon")
 }
 
-fn spawn_tray_thread() -> std::sync::mpsc::Sender<[u8; 3]> {
-    let (tx, rx) = std::sync::mpsc::channel::<[u8; 3]>();
+/// Sends (color, tooltip) state updates to the tray thread.
+fn spawn_tray_thread() -> std::sync::mpsc::Sender<([u8; 3], &'static str)> {
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    let (tx, rx) = std::sync::mpsc::channel::<([u8; 3], &'static str)>();
 
     std::thread::spawn(move || {
-        if gtk::init().is_err() {
-            return; // no display, skip tray
+        if let Err(e) = gtk::init() {
+            eprintln!("Tray: GTK init failed ({e}) - no tray icon");
+            return;
         }
-        let tray = tray_icon::TrayIconBuilder::new()
-            .with_tooltip("Voice2Prompt")
-            .with_icon(make_icon(0x2e, 0xcc, 0x71))
-            .build()
-            .expect("tray icon");
+        let menu = Menu::new();
+        let quit_item = MenuItem::new("Quit Voice2Prompt", true, None);
+        let _ = menu.append(&quit_item);
 
+        let tray = match tray_icon::TrayIconBuilder::new()
+            .with_tooltip("Voice2Prompt - ready")
+            .with_icon(make_icon(COL_READY))
+            .with_menu(Box::new(menu))
+            .build()
+        {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Tray: failed to create icon: {e}");
+                return;
+            }
+        };
+        eprintln!("Tray icon registered");
+
+        let quit_id = quit_item.id().clone();
+        let menu_rx = MenuEvent::receiver();
         loop {
-            while let Ok(rgb) = rx.try_recv() {
-                let _ = tray.set_icon(Some(make_icon(rgb[0], rgb[1], rgb[2])));
+            while let Ok((rgb, tip)) = rx.try_recv() {
+                let _ = tray.set_icon(Some(make_icon(rgb)));
+                let _ = tray.set_tooltip(Some(tip));
+            }
+            while let Ok(ev) = menu_rx.try_recv() {
+                if ev.id == quit_id {
+                    std::process::exit(0);
+                }
             }
             gtk::main_iteration_do(false);
             std::thread::sleep(Duration::from_millis(50));
@@ -219,11 +262,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _stream = open_audio_stream(recording.clone(), audio_buf.clone())?;
 
     // UDP listener
-    let sock = UdpSocket::bind(format!("127.0.0.1:{UDP_CMD_PORT}"))?;
+    let sock = UdpSocket::bind(format!("127.0.0.1:{UDP_CMD_PORT}"))
+        .map_err(|e| format!("cannot bind UDP :{UDP_CMD_PORT} ({e}) - is another v2p-daemon already running?"))?;
     sock.set_read_timeout(Some(Duration::from_millis(50)))?;
 
     eprintln!("Ready - hold Right Ctrl to record");
-    let _ = tray_tx.send([0x2e, 0xcc, 0x71]);
+    let _ = tray_tx.send((COL_READY, "Voice2Prompt - ready"));
 
     let mut udp_buf = [0u8; 64];
 
@@ -236,11 +280,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         recording.store(true, Ordering::SeqCst);
                         audio_buf.lock().unwrap().clear();
                         eprint!("\rRecording ... ");
-                        let _ = tray_tx.send([0xff, 0x00, 0x00]);
+                        let _ = tray_tx.send((COL_REC, "Voice2Prompt - recording..."));
                     }
                     "STOP" => {
                         recording.store(false, Ordering::SeqCst);
-                        let _ = tray_tx.send([0xf1, 0xc4, 0x0f]);
+                        let _ = tray_tx.send((COL_BUSY, "Voice2Prompt - transcribing..."));
 
                         let samples: Vec<i16> = {
                             let mut buf = audio_buf.lock().unwrap();
@@ -249,7 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if samples.len() < MIN_SAMPLES {
                             eprintln!("\rToo short, skipped                ");
-                            let _ = tray_tx.send([0x2e, 0xcc, 0x71]);
+                            let _ = tray_tx.send((COL_READY, "Voice2Prompt - ready"));
                             continue;
                         }
 
@@ -290,13 +334,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if copy_clip(&paste) {
                                 std::thread::sleep(Duration::from_millis(150));
                                 send_paste();
+                                // let the injected paste land before printing
+                                std::thread::sleep(Duration::from_millis(200));
+                                eprintln!("\nPasted.");
                             }
                         } else {
                             eprintln!("\rNo speech detected");
                         }
 
-                        let _ = tray_tx.send([0x2e, 0xcc, 0x71]);
-                        eprint!("\rReady - hold Right Ctrl to record");
+                        let _ = tray_tx.send((COL_READY, "Voice2Prompt - ready"));
+                        eprintln!("Ready - hold Right Ctrl to record");
                     }
                     _ => {}
                 }

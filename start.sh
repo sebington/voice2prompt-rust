@@ -19,7 +19,7 @@ cleanup() {
     echo ""
     echo "Shutting down…"
     [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
-    [ -n "$ROOT_PID" ]   && kill "$ROOT_PID" 2>/dev/null
+    [ -n "$ROOT_PID" ]   && sudo kill "$ROOT_PID" 2>/dev/null
     exit 0
 }
 trap cleanup SIGINT SIGTERM
@@ -27,6 +27,11 @@ trap cleanup SIGINT SIGTERM
 # Sudo upfront
 echo "Requesting sudo for keyboard listener…"
 sudo -v || { echo "sudo required"; exit 1; }
+
+# Kill stale instances from previous runs
+pkill -f v2p-daemon 2>/dev/null || true
+sudo pkill -f v2p-listener 2>/dev/null || true
+sleep 1
 
 # Start daemon (user process)
 echo "Starting audio service…"
