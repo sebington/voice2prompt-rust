@@ -1,8 +1,8 @@
-// v2p-listener — runs as root.
-// Reads /dev/input/event* keyboards, monitors Right Ctrl,
-// sends START/STOP to daemon, and simulates Ctrl+V on PASTE.
+// v2p listener — reads /dev/input/event* keyboards, monitors Right Ctrl,
+// sends START/STOP to the daemon, and simulates Ctrl+V on PASTE.
+// Needs read access to event devices and write access to /dev/uinput
+// (input group via udev rule, or root).
 
-use clap::Parser;
 use evdev::{
     raw_stream::RawDevice,
     uinput::VirtualDevice,
@@ -16,11 +16,7 @@ use std::time::Duration;
 const UDP_CMD_PORT: u16 = 5005;
 const UDP_PASTE_PORT: u16 = 5006;
 
-#[derive(Parser)]
-#[command(name = "v2p-listener", about = "Voice2Prompt keyboard listener (root)")]
-struct Args;
-
-fn find_keyboards() -> Vec<String> {
+pub fn find_keyboards() -> Vec<String> {
     let mut keyboards = Vec::new();
     let dir = match std::fs::read_dir("/dev/input") {
         Ok(d) => d,
@@ -37,11 +33,14 @@ fn find_keyboards() -> Vec<String> {
             Ok(d) => d,
             _ => continue,
         };
-        let has_keys = dev.supported_keys().map(|keys| {
-            keys.contains(KeyCode::KEY_A)
-                || keys.contains(KeyCode::KEY_ENTER)
-                || keys.contains(KeyCode::KEY_SPACE)
-        }).unwrap_or(false);
+        let has_keys = dev
+            .supported_keys()
+            .map(|keys| {
+                keys.contains(KeyCode::KEY_A)
+                    || keys.contains(KeyCode::KEY_ENTER)
+                    || keys.contains(KeyCode::KEY_SPACE)
+            })
+            .unwrap_or(false);
         if has_keys {
             keyboards.push(path.to_string_lossy().to_string());
         }
@@ -76,9 +75,7 @@ fn send_ctrl_v(uinput: &mut VirtualDevice) {
     let _ = uinput.emit(&events);
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _args = Args::parse();
-
+pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Find keyboard devices
     let kb_paths = find_keyboards();
     eprintln!("Found {} keyboard device(s)", kb_paths.len());
@@ -103,12 +100,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Virtual uinput keyboard for Ctrl+V injection
-    let mut uinput = create_uinput_keyboard()
-        .expect("Cannot create uinput — are you root?");
+    let mut uinput = create_uinput_keyboard().ok_or_else(|| {
+        "Cannot create uinput device - check /dev/uinput access (run ./install.sh or use sudo)"
+            .to_string()
+    })?;
 
     // UDP sockets
-    let cmd_sock = UdpSocket::bind(format!("127.0.0.1:{UDP_PASTE_PORT}"))
-        .map_err(|e| format!("cannot bind UDP :{UDP_PASTE_PORT} ({e}) - is another v2p-listener already running?"))?;
+    let cmd_sock = UdpSocket::bind(format!("127.0.0.1:{UDP_PASTE_PORT}")).map_err(|e| {
+        format!(
+            "cannot bind UDP :{UDP_PASTE_PORT} ({e}) - is another v2p already running?"
+        )
+    })?;
     cmd_sock.set_read_timeout(Some(Duration::from_millis(50)))?;
     let out_sock = UdpSocket::bind("127.0.0.1:0")?;
 
@@ -122,10 +124,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match dev.fetch_events() {
                 Ok(mut events) => {
                     while let Some(ev) = events.next() {
-                        if ev.event_type().0 != 0x01 { continue; } // EV_KEY only
-                        if ev.code() != 97 { continue; }           // KEY_RIGHTCTRL
+                        if ev.event_type().0 != 0x01 {
+                            continue;
+                        } // EV_KEY only
+                        if ev.code() != 97 {
+                            continue;
+                        } // KEY_RIGHTCTRL
                         let val = ev.value();
-                        if val == 2 { continue; }                   // skip auto-repeat
+                        if val == 2 {
+                            continue;
+                        } // skip auto-repeat
                         if val == 1 && !pressed {
                             pressed = true;
                             let _ = out_sock

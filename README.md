@@ -4,42 +4,47 @@ Push-to-talk dictation for Linux: hold **Right Ctrl**, speak, release — speech
 transcribed locally with Whisper and pasted into the active application.
 System-wide, works in any app.
 
-Two native binaries communicate over UDP on localhost:
+One binary (`v2p`) with subcommands:
 
-- **v2p-daemon** (user) — audio capture, Whisper STT, clipboard, tray icon
-- **v2p-listener** (root) — Right Ctrl monitoring via evdev, Ctrl+V injection via uinput
+| Command | Purpose |
+|---|---|
+| `v2p run` | Normal entry point: daemon + keyboard listener together |
+| `v2p daemon` | Audio, transcription, clipboard, tray (user space) |
+| `v2p listen` | Right Ctrl detection (evdev) + Ctrl+V injection (uinput) |
+| `v2p doctor` | Permission & environment diagnostics |
 
 ## Quick start
 
 ```bash
+# one-time setup: grants device access so no sudo is needed later
+./install.sh        # then log out and back in
+
+# run
 ./start.sh
 ```
 
-Builds if needed, asks for sudo once (listener needs `/dev/input` access),
-kills stale instances from previous runs, then starts both processes.
-Hold Right Ctrl to dictate. Ctrl+C stops everything.
+Hold Right Ctrl to dictate, release to transcribe and paste. Ctrl+C stops
+everything. The tray icon shows green = ready, red = recording, yellow =
+transcribing.
 
 ## Features
 
 - **Local transcription** — Whisper.cpp (`whisper-rs`), no network, no API key
-- **System tray indicator** — green = ready, red = recording, yellow = transcribing;
-  hover for state tooltip, click for a Quit menu
+- **No root at runtime** — udev rule + `input` group (installed once by
+  `install.sh`); falls back to `sudo v2p listen` if access is missing
+- **System tray indicator** — green/red/yellow states, hover tooltip, Quit menu
 - **Terminal feedback** — `Recording…` → `Transcribed: …` → `Pasted.`
 - **Languages** — English (`--language en`, default) and French (`--language fr`)
-- **Model auto-download** — Whisper `tiny` model fetched on first run with progress
-  to `~/.local/share/voice2prompt/models/`
+- **Model auto-download** — Whisper `tiny` model fetched on first run with
+  progress to `~/.local/share/voice2prompt/models/`
 - **Clipboard fallback chain** — `wl-copy` (Wayland) → `arboard` (X11) → `xclip`
 
-## Manual build & run
+## Manual run
 
 ```bash
 cargo build --release
-
-# terminal 1
-./target/release/v2p-daemon --language en
-
-# terminal 2
-sudo ./target/release/v2p-listener
+./target/release/v2p run --language en
+./target/release/v2p doctor    # check setup
 ```
 
 ## Requirements
@@ -47,7 +52,8 @@ sudo ./target/release/v2p-listener
 Runtime:
 
 - Linux (X11 or Wayland) with ALSA
-- sudo / root access for the listener (evdev + uinput)
+- Device access for the listener: after `./install.sh` + re-login this is a
+  non-root `input`-group member (evdev + uinput); otherwise the listener needs root
 - `wl-clipboard` (Wayland) or `xclip` (X11) recommended for reliable pasting
 - GTK3 + libayatana-appindicator3 for the tray icon
   (optional — app works without it; on GNOME the AppIndicator extension must be enabled)
@@ -63,16 +69,24 @@ cargo build --release
 ## How it works
 
 ```
-v2p-listener (root)                    v2p-daemon (user)
-/dev/input/event* ── Right Ctrl ──▶ UDP :5005 START/STOP ──▶ record / transcribe
-uinput Ctrl+V   ◀── UDP :5006 PASTE ◀── clipboard set ◀── whisper-rs
+v2p run
+├─ daemon (in-process)      ── UDP :5005 START/STOP ──►  listener
+│   audio (cpal) ─► whisper-rs ─► clipboard ─► paste cmd ──►  uinput Ctrl+V
+└─ listener (thread, or sudo child if no device access)
 ```
+
+The daemon captures 16 kHz mono audio while Right Ctrl is held, transcribes
+with the Whisper tiny model, copies the result, and asks the listener to inject
+Ctrl+V into the focused application.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `daemon/src/main.rs` | User process: audio, STT, clipboard, tray, UDP command receiver |
-| `listener/src/main.rs` | Root process: evdev keyboard reader, Ctrl+V injector |
-| `start.sh` | Launcher: build check, stale-instance cleanup, sudo handling |
-| `Cargo.toml` | Workspace definition |
+| `src/main.rs` | CLI, `run` supervisor, `doctor` |
+| `src/daemon.rs` | Audio, STT, clipboard, tray |
+| `src/listener.rs` | evdev keyboard reader, Ctrl+V injector |
+| `src/perms.rs` | Device permission checks |
+| `packaging/99-voice2prompt.rules` | udev rule for non-root device access |
+| `install.sh` | One-time setup (udev rule + `input` group) |
+| `start.sh` | Launcher (build check, stale-instance cleanup) |

@@ -1,7 +1,33 @@
-[workspace]
-resolver = "2"
-members = ["daemon", "listener"]
-
-[workspace.package]
+[package]
+name = "v2p"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+# Audio capture
+cpal = "0.15"
+
+# Speech-to-text (whisper.cpp bindings)
+whisper-rs = "0.13"
+
+# System tray
+tray-icon = "0.19"
+
+# Clipboard
+arboard = "3.4"
+
+# Argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# HTTP client for model download
+ureq = "2.12"
+
+# Tray requires GTK on Linux
+gtk = "0.18"
+
+# Keyboard reading (evdev) + Ctrl+V injection (uinput)
+evdev = "0.13"
+nix = { version = "0.29", features = ["fs"] }
+
+# Graceful shutdown / child cleanup
+ctrlc = "3.4"

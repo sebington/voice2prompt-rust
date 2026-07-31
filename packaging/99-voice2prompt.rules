@@ -1,0 +1,9 @@
+# voice2prompt: allow users in the `input` group to read keyboards (evdev)
+# and create the virtual Ctrl+V device (uinput), without root.
+# The `uaccess` tag additionally grants access to the logged-in seat user on
+# systemd systems.
+#
+# Install with ./install.sh (copies to /etc/udev/rules.d/, then reloads).
+
+SUBSYSTEM=="input", KERNEL=="event*", GROUP="input", MODE="0660", TAG+="uaccess"
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", TAG+="uaccess"

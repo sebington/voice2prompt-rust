@@ -9,13 +9,14 @@
 Push-to-talk dictation: hold Right Ctrl, speak, release — text is transcribed
 via Whisper and pasted into the active application. System-wide, works in any app.
 
-Originally a Python/uv script, ported to Rust as two native binaries.
+Single native Rust binary (`v2p`) with subcommands. Originally two separate
+binaries (daemon + listener); merged into one so it can be shipped as a single
+artifact.
 
 ## 2. Tech stack
 
-- Language(s): Rust (edition 2021)
-- Framework(s): none — bare cargo workspace with two binaries
-- Database: none
+- Language: Rust (edition 2021)
+- Framework(s): none — plain cargo binary crate
 - Key dependencies:
   - `whisper-rs` (0.13) — Whisper.cpp bindings for STT
   - `cpal` (0.15) — audio capture via ALSA
@@ -26,43 +27,55 @@ Originally a Python/uv script, ported to Rust as two native binaries.
 
 ## 3. Architecture overview
 
-Split-privilege design. Two processes communicate over UDP on localhost:
+One binary, four subcommands:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ v2p-daemon  (user)                                         │
+v2p run      ← normal entry point: daemon + listener, supervises both
+v2p daemon   ← audio / Whisper STT / clipboard / tray (user space)
+v2p listen   ← evdev Right-Ctrl detection + uinput Ctrl+V injection
+v2p doctor   ← permission & environment diagnostics
+```
+
+Privilege handling in `v2p run`:
+
+- If the user has device access (see §6), the listener runs **in-process as a
+  thread** — single process, no root.
+- Otherwise `v2p run` re-execs `sudo v2p listen` as a child process and monitors
+  it: if the listener dies within a 10s grace period, the daemon shuts down too
+  (no silently dead app).
+
+The two halves still communicate over UDP on localhost (ports 5005/5006):
+
+```
+┌────────────────────────── v2p run ──────────────────────────┐
+│  daemon (main/thread)           listener (thread or child)  │
 │                                                             │
-│  UDP :5005 ← START/STOP ← listener                         │
-│  UDP :5006 → PASTE    → listener                           │
-│                                                             │
-│  Audio: cpal (16 kHz mono i16)                              │
-│  STT:   whisper-rs (tiny.en / tiny model)                   │
-│  Tray:  tray-icon (green=ready, red=recording)              │
-│  Clip:  wl-copy → arboard → xclip                           │
+│  Audio: cpal (16 kHz mono i16)  evdev: /dev/input/event*    │
+│  STT:   whisper-rs (tiny.en/tiny)│ detects KEY_RIGHTCTRL     │
+│  Tray:  tray-icon (green/red/   │ → START/STOP → daemon      │
+│         yellow, tooltip, menu)  │                            │
+│  Clip:  wl-copy → arboard →     │ uinput: injects Ctrl+V     │
+│         xclip                    │ ← PASTE ← daemon           │
 └─────────────────────────────────────────────────────────────┘
-        ▲ UDP ports 5005/5006 on 127.0.0.1
-        ▼
-┌─────────────────────────────────────────────────────────────┐
-│ v2p-listener  (root)                                       │
-│                                                             │
-│  evdev raw_stream: reads /dev/input/event* keyboards       │
-│    → detects KEY_RIGHTCTRL press/release                   │
-│    → sends START / STOP to daemon                           │
-│                                                             │
-│  uinput virtual keyboard: injects Ctrl+V on PASTE           │
-└─────────────────────────────────────────────────────────────┘
+        UDP 5005 (START/STOP) and 5006 (PASTE) on 127.0.0.1
 ```
 
 **Key entry points:**
-- App starts at: `start.sh` (builds + launches both)
-- Daemon: `daemon/src/main.rs`
-- Listener: `listener/src/main.rs`
+- App starts at: `start.sh` (builds, kills stale instances, `exec v2p run`)
+- CLI: `src/main.rs` (subcommand dispatch, `run` orchestration, `doctor`)
+- Daemon logic: `src/daemon.rs`
+- Listener logic: `src/listener.rs`
+- Device permissions: `src/perms.rs`, `packaging/99-voice2prompt.rules`
 
 ## 4. Conventions
 
-- No tests yet. Manual testing via `./start.sh`.
-- Error handling: `Box<dyn std::error::Error>` in main, `Result<(), String>` for helpers.
+- No tests yet. Manual testing via `./start.sh` or `v2p doctor`.
+- Error handling: `Result<(), Box<dyn std::error::Error + Send + Sync>>` in main,
+  `Result<(), String>` for helpers.
 - Clipboard: prefer `wl-copy` first (Wayland), then `arboard` (X11), then `xclip`.
+- Tray state is pushed over an mpsc channel as `(color, tooltip)` pairs;
+  quitting from the tray menu sets the shared `shutdown` flag (never
+  `std::process::exit` — the `run` supervisor must clean up the listener child).
 
 ## 5. How to build, run, and test
 
@@ -70,15 +83,19 @@ Split-privilege design. Two processes communicate over UDP on localhost:
 # build
 cargo build --release
 
-# run (builds if needed, handles sudo)
-./start.sh
+# one-time install (udev rule + input group; no sudo needed after)
+./install.sh          # then log out & back in
 
-# run binaries separately (e.g. for debugging)
-./target/release/v2p-daemon --language en   # terminal 1
-sudo ./target/release/v2p-listener           # terminal 2
+# run (builds if needed)
+./start.sh            # or: target/release/v2p run --language en
+
+# manual / debugging
+./target/release/v2p daemon --language en   # audio/STT/tray only
+./target/release/v2p listen                 # privileged part only
+./target/release/v2p doctor                 # permission diagnostics
 ```
 
-System deps:
+System deps (build):
 ```bash
 sudo apt install build-essential pkg-config cmake \
   libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
@@ -86,6 +103,14 @@ sudo apt install build-essential pkg-config cmake \
 
 ## 6. Things that are NOT obvious from the code
 
+- **Device access without root:** `install.sh` installs
+  `packaging/99-voice2prompt.rules` (grants the `input` group read on
+  `/dev/input/event*` and write on `/dev/uinput`, plus `uaccess` tag for
+  systemd logind). The user must be in the `input` group **after a re-login**.
+  `v2p run` falls back to `sudo v2p listen` when access is missing.
+- **`v2p run` supervision:** the daemon runs on a worker thread; the main thread
+  supervises the listener child (grace-period startup check, kill on exit).
+  Ctrl+C is caught via `ctrlc` → sets `shutdown` → clean teardown.
 - **sync_stream swallows events.** The `evdev::Device` (from `sync_stream`) can
   miss key-release events in non-blocking polls. Always use `raw_stream::RawDevice`
   with manual `O_NONBLOCK` via `nix::fcntl` for this use-case.
@@ -95,16 +120,21 @@ sudo apt install build-essential pkg-config cmake \
 - **Tray icon needs GTK thread.** On Linux, `tray-icon` requires `gtk::init()` +
   a polling loop calling `gtk::main_iteration_do(false)` in a dedicated thread.
   If GTK init fails (no display), the thread exits silently — no tray icon but
-  the app still works.
+  the app still works. Only that thread touches GTK.
 - **whisper.cpp builds from source.** `whisper-rs` invokes cmake during `cargo build`
   to compile whisper.cpp. First build takes ~5 min. Requires cmake + C++ compiler.
 - **Mono 16 kHz audio.** `cpal` with ALSA on Linux supports 16 kHz mono i16
   natively. No resampling needed.
+- **Terminal output.** `Transcribed: …` → the injected paste may land in the
+  same terminal (it's the active app) → `Pasted.` → `Ready`. The middle copy is
+  the real paste, not a log line.
 
 ## 7. Where to find more detail
 
-- Rust implementation: `daemon/src/main.rs`, `listener/src/main.rs`
-- Python original (reference): `voice_daemon_local.py`, `key_listener.py`
+- CLI: `src/main.rs`
+- Daemon: `src/daemon.rs`
+- Listener: `src/listener.rs`
+- Packaging: `install.sh`, `packaging/99-voice2prompt.rules`
 - README: basic usage instructions
 - Model files auto-download to `~/.local/share/voice2prompt/models/`
 

@@ -1,4 +1,5 @@
-use clap::Parser;
+// v2p daemon — user-space process: audio capture, Whisper STT, clipboard, tray.
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::io::{Read, Write};
 use std::net::UdpSocket;
@@ -15,12 +16,13 @@ const MIN_SAMPLES: usize = 1600;
 const MODEL_BASE_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
-#[derive(Parser)]
-#[command(name = "v2p-daemon")]
-struct Args {
-    #[arg(short, long, default_value = "en")]
-    language: String,
-}
+// ── Tray colors ────────────────────────────────────────────────────────────
+
+const COL_READY: [u8; 3] = [0x2e, 0xcc, 0x71]; // green
+const COL_REC: [u8; 3] = [0xe7, 0x4c, 0x3c]; // red
+const COL_BUSY: [u8; 3] = [0xf1, 0xc4, 0x0f]; // yellow
+
+// ── Model ──────────────────────────────────────────────────────────────────
 
 struct LangCfg {
     model_file: &'static str,
@@ -29,13 +31,17 @@ struct LangCfg {
 
 fn lang_cfg(lang: &str) -> Option<LangCfg> {
     match lang {
-        "en" => Some(LangCfg { model_file: "ggml-tiny.en.bin", whisper_lang: "en" }),
-        "fr" => Some(LangCfg { model_file: "ggml-tiny.bin", whisper_lang: "fr" }),
+        "en" => Some(LangCfg {
+            model_file: "ggml-tiny.en.bin",
+            whisper_lang: "en",
+        }),
+        "fr" => Some(LangCfg {
+            model_file: "ggml-tiny.bin",
+            whisper_lang: "fr",
+        }),
         _ => None,
     }
 }
-
-// ── Model ──────────────────────────────────────────────────────────────────
 
 fn model_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -59,7 +65,9 @@ fn download_model(model_file: &str, dest: &std::path::Path) -> Result<(), String
         let mut buf = [0u8; 8192];
         loop {
             let n = reader.read(&mut buf).map_err(|e| format!("read: {e}"))?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             file.write_all(&buf[..n]).map_err(|e| format!("write: {e}"))?;
             done += n as u64;
             eprint!("\r  {}%", done * 100 / total);
@@ -72,10 +80,6 @@ fn download_model(model_file: &str, dest: &std::path::Path) -> Result<(), String
 }
 
 // ── Tray icon ──────────────────────────────────────────────────────────────
-
-const COL_READY: [u8; 3] = [0x2e, 0xcc, 0x71]; // green
-const COL_REC: [u8; 3] = [0xe7, 0x4c, 0x3c]; // red
-const COL_BUSY: [u8; 3] = [0xf1, 0xc4, 0x0f]; // yellow
 
 fn make_icon(rgb: [u8; 3]) -> tray_icon::Icon {
     // Filled circle with dark border ring on transparent background,
@@ -103,7 +107,11 @@ fn make_icon(rgb: [u8; 3]) -> tray_icon::Icon {
 }
 
 /// Sends (color, tooltip) state updates to the tray thread.
-fn spawn_tray_thread() -> std::sync::mpsc::Sender<([u8; 3], &'static str)> {
+/// Quitting from the tray menu sets `shutdown` so the main loop can clean up
+/// (kill the sudo listener child) instead of hard-exiting the process.
+fn spawn_tray_thread(
+    shutdown: Arc<AtomicBool>,
+) -> std::sync::mpsc::Sender<([u8; 3], &'static str)> {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem};
     let (tx, rx) = std::sync::mpsc::channel::<([u8; 3], &'static str)>();
 
@@ -139,7 +147,7 @@ fn spawn_tray_thread() -> std::sync::mpsc::Sender<([u8; 3], &'static str)> {
             }
             while let Ok(ev) = menu_rx.try_recv() {
                 if ev.id == quit_id {
-                    std::process::exit(0);
+                    shutdown.store(true, Ordering::SeqCst);
                 }
             }
             gtk::main_iteration_do(false);
@@ -225,12 +233,14 @@ fn send_paste() {
     }
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────
+// ── Main entry (called from `v2p run` and `v2p daemon`) ────────────────────
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-    let cfg = lang_cfg(&args.language)
-        .ok_or_else(|| format!("unsupported lang '{}'", args.language))?;
+pub fn run(
+    language: &str,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cfg = lang_cfg(language)
+        .ok_or_else(|| format!("unsupported lang '{language}'"))?;
 
     // Model
     let model_dir = model_dir();
@@ -252,7 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Tray icon (background thread, silently skips if no display)
-    let tray_tx = spawn_tray_thread();
+    let tray_tx = spawn_tray_thread(shutdown.clone());
 
     // Shared state
     let recording = Arc::new(AtomicBool::new(false));
@@ -263,7 +273,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // UDP listener
     let sock = UdpSocket::bind(format!("127.0.0.1:{UDP_CMD_PORT}"))
-        .map_err(|e| format!("cannot bind UDP :{UDP_CMD_PORT} ({e}) - is another v2p-daemon already running?"))?;
+        .map_err(|e| {
+            format!(
+                "cannot bind UDP :{UDP_CMD_PORT} ({e}) - is another v2p already running?"
+            )
+        })?;
     sock.set_read_timeout(Some(Duration::from_millis(50)))?;
 
     eprintln!("Ready - hold Right Ctrl to record");
@@ -272,6 +286,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut udp_buf = [0u8; 64];
 
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         match sock.recv_from(&mut udp_buf) {
             Ok((len, _)) => {
                 let cmd = String::from_utf8_lossy(&udp_buf[..len]);
@@ -299,8 +316,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         eprint!("\rTranscribing ...                     ");
 
-                        let f32s: Vec<f32> =
-                            samples.iter().map(|&s| s as f32 / 32768.0).collect();
+                        let f32s: Vec<f32> = samples
+                            .iter()
+                            .map(|&s| s as f32 / 32768.0)
+                            .collect();
 
                         let text = {
                             use whisper_rs::{FullParams, SamplingStrategy};
@@ -355,4 +374,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    Ok(())
 }
