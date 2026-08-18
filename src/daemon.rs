@@ -50,7 +50,7 @@ fn model_dir() -> PathBuf {
 
 fn download_model(model_file: &str, dest: &std::path::Path) -> Result<(), String> {
     let url = format!("{MODEL_BASE_URL}/{model_file}");
-    eprintln!("Downloading {model_file}");
+    eprint!("Downloading {model_file}: ");
 
     let resp = ureq::get(&url).call().map_err(|e| format!("HTTP: {e}"))?;
     let total: u64 = resp
