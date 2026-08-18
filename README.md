@@ -16,7 +16,8 @@ One binary (`v2p`) with subcommands:
 ## Quick start
 
 ```bash
-# one-time setup: grants device access so no sudo is needed later
+# one-time setup: installs v2p to /usr/local/bin and grants device
+# access (udev rule + input group) so no sudo is needed later
 ./install.sh        # then log out and back in
 
 # run
@@ -35,8 +36,9 @@ transcribing.
 - **System tray indicator** — green/red/yellow states, hover tooltip, Quit menu
 - **Terminal feedback** — `Recording…` → `Transcribed: …` → `Pasted.`
 - **Languages** — English (`--language en`, default) and French (`--language fr`)
-- **Model auto-download** — Whisper `tiny` model fetched on first run with
-  progress to `~/.local/share/voice2prompt/models/`
+- **Model auto-download** — Whisper model fetched on first run with progress to
+  `~/.local/share/voice2prompt/models/` (`tiny.en` for English, multilingual
+  `tiny` for French)
 - **Clipboard fallback chain** — `wl-copy` (Wayland) → `arboard` (X11) → `xclip`
 
 ## Manual run
@@ -66,6 +68,17 @@ sudo apt install build-essential pkg-config cmake \
 cargo build --release
 ```
 
+## Debian package
+
+```bash
+cargo install cargo-deb
+cargo deb            # builds target/debian/v2p_<version>_amd64.deb
+```
+
+The `.deb` installs the binary to `/usr/local/bin`, the udev rule to
+`/etc/udev/rules.d/`, and a postinst script reloads udev and adds the
+installing user to the `input` group (re-login still required).
+
 ## How it works
 
 ```
@@ -88,5 +101,6 @@ Ctrl+V into the focused application.
 | `src/listener.rs` | evdev keyboard reader, Ctrl+V injector |
 | `src/perms.rs` | Device permission checks |
 | `packaging/99-voice2prompt.rules` | udev rule for non-root device access |
-| `install.sh` | One-time setup (udev rule + `input` group) |
+| `scripts/postinst` | .deb postinstall (udev reload, `input` group) |
+| `install.sh` | One-time setup (udev rule + `input` group + install to `/usr/local/bin`) |
 | `start.sh` | Launcher (build check, stale-instance cleanup) |

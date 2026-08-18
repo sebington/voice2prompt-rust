@@ -21,9 +21,14 @@ artifact.
   - `whisper-rs` (0.13) — Whisper.cpp bindings for STT
   - `cpal` (0.15) — audio capture via ALSA
   - `evdev` (0.13, `raw_stream`) — Linux input event reading
-  - `tray-icon` (0.19) — system tray indicator (Linux: GTK + libappindicator)
-  - `arboard` / `wl-copy` — clipboard
-- Build: cargo
+  - `tray-icon` (0.19) + `gtk` (0.18) — system tray indicator (Linux: GTK + libappindicator)
+  - `arboard` / `wl-copy` / `xclip` — clipboard fallback chain
+  - `clap` (4, derive) — CLI subcommands
+  - `ureq` (2) — HTTPS model download from huggingface.co
+  - `nix` (0.29, fs) — `O_NONBLOCK` on evdev fds
+  - `ctrlc` (3) — graceful shutdown
+- Build: cargo; `.deb` packaging via `cargo-deb` ([package.metadata.deb] in
+  Cargo.toml + `scripts/postinst`)
 
 ## 3. Architecture overview
 
@@ -83,8 +88,12 @@ The two halves still communicate over UDP on localhost (ports 5005/5006):
 # build
 cargo build --release
 
-# one-time install (udev rule + input group; no sudo needed after)
+# one-time install (udev rule + input group + binary to /usr/local/bin;
+# no sudo needed after)
 ./install.sh          # then log out & back in
+
+# build a .deb package (installs same pieces via dpkg + scripts/postinst)
+cargo install cargo-deb && cargo deb
 
 # run (builds if needed)
 ./start.sh            # or: target/release/v2p run --language en
@@ -106,7 +115,9 @@ sudo apt install build-essential pkg-config cmake \
 - **Device access without root:** `install.sh` installs
   `packaging/99-voice2prompt.rules` (grants the `input` group read on
   `/dev/input/event*` and write on `/dev/uinput`, plus `uaccess` tag for
-  systemd logind). The user must be in the `input` group **after a re-login**.
+  systemd logind), adds the user to the `input` group, and installs the
+  binary to `/usr/local/bin`. The user must re-login for group membership.
+  The `.deb` (`cargo deb`) does the same via `scripts/postinst`.
   `v2p run` falls back to `sudo v2p listen` when access is missing.
 - **`v2p run` supervision:** the daemon runs on a worker thread; the main thread
   supervises the listener child (grace-period startup check, kill on exit).
@@ -134,7 +145,8 @@ sudo apt install build-essential pkg-config cmake \
 - CLI: `src/main.rs`
 - Daemon: `src/daemon.rs`
 - Listener: `src/listener.rs`
-- Packaging: `install.sh`, `packaging/99-voice2prompt.rules`
+- Packaging: `install.sh`, `packaging/99-voice2prompt.rules`,
+  `scripts/postinst` + `[package.metadata.deb]` in Cargo.toml (`cargo deb`)
 - README: basic usage instructions
 - Model files auto-download to `~/.local/share/voice2prompt/models/`
 
