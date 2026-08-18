@@ -1,0 +1,16 @@
+#!/bin/bash
+set -e
+
+# Reload udev rules
+udevadm control --reload-rules
+udevadm trigger
+
+# Add invoking user to input group (if installed via sudo)
+if [ -n "$SUDO_USER" ]; then
+    if ! id -nG "$SUDO_USER" | grep -qw input; then
+        usermod -a -G input "$SUDO_USER" 2>/dev/null || true
+        echo "Added '$SUDO_USER' to 'input' group. Log out and back in to activate."
+    fi
+fi
+
+echo "v2p installed. Run: v2p doctor"

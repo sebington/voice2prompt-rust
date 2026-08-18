@@ -2,6 +2,7 @@
 name = "v2p"
 version = "0.1.0"
 edition = "2021"
+description = "Push-to-talk dictation via Whisper STT"
 
 [dependencies]
 # Audio capture
@@ -31,3 +32,17 @@ nix = { version = "0.29", features = ["fs"] }
 
 # Graceful shutdown / child cleanup
 ctrlc = "3.4"
+
+[package.metadata.deb]
+maintainer = "Voice2Prompt Contributors"
+copyright = "2025, Voice2Prompt Contributors"
+license-file = ["README.md", "4"]
+extended-description = "Push-to-talk dictation: hold Right Ctrl, speak, release — text is transcribed via Whisper and pasted into the active application. System-wide, works in any app."
+depends = "$auto, libgtk-3-0, libayatana-appindicator3-1"
+assets = [
+    ["target/release/v2p", "usr/local/bin/", "755"],
+    ["packaging/99-voice2prompt.rules", "etc/udev/rules.d/", "644"],
+    ["README.md", "usr/share/doc/v2p/", "644"],
+]
+maintainer-scripts = "scripts/"
+profile = "release"
